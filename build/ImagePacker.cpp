@@ -2,6 +2,7 @@
 //
 
 #include "stdafx.h"
+#include "picosha2.h"
 
 void print_usage(const char *exe)
 {
@@ -35,6 +36,7 @@ struct
 		FMT_JSON,
 		FMT_PLIST
 	}format;
+	bool compact;
 }options;
 
 void initOption()
@@ -46,6 +48,7 @@ void initOption()
 	options.bound = true;
 	options.split = false;
 	options.format = options.FMT_BKE;
+	options.compact = false;
 }
 
 //if file is a relative path, set it to be full path by see it as a file under dir
@@ -136,6 +139,10 @@ void readOption(int argc, char ** argv)
 					cout << "invalid format:" << *argv << endl;
 				}
 			}
+		}
+		else if (!strcmp("-compact", *argv))
+		{
+			options.compact = true;
 		}
 		else
 		{
@@ -248,7 +255,7 @@ typedef SDL_Rect Rect;
 
 struct ImageInfo
 {
-	string filename;
+	vector<string> filenames;
 	int rawwidth;
 	int rawheight;
 	Rect bounding;
@@ -266,7 +273,43 @@ struct
 	int totalArea;
 }stat_info;
 
+struct array32_hash
+{
+	size_t operator()(const array<unsigned char, 32> &arr) const
+	{
+		if (sizeof(size_t) == 4)
+		{
+			size_t a = *(size_t *)&arr[0];
+			size_t b = *(size_t *)&arr[4];
+			size_t c = *(size_t *)&arr[8];
+			size_t d = *(size_t *)&arr[12];
+			size_t e = *(size_t *)&arr[16];
+			size_t f = *(size_t *)&arr[20];
+			size_t g = *(size_t *)&arr[24];
+			size_t h = *(size_t *)&arr[28];
+			return a ^ b ^ c ^ d ^ e ^ f ^ g ^ h;
+		}
+		else
+		{
+			size_t a = *(size_t *)&arr[0];
+			size_t b = *(size_t *)&arr[8];
+			size_t c = *(size_t *)&arr[16];
+			size_t d = *(size_t *)&arr[24];
+			return a ^ b ^ c ^ d;
+		}
+	}
+};
+
+struct array32_equal
+{
+	bool operator()(const array<unsigned char, 32> &l, const array<unsigned char, 32> &r) const
+	{
+		return memcmp(l.data(), r.data(), 32) == 0;
+	}
+};
+
 unordered_map<Img*, ImageInfo> infomap;
+unordered_map<array<unsigned char, 32>, Img *, array32_hash, array32_equal> hashedinfomap; // Map with hash to Img
 
 void findBounding(Img *img, ImageInfo& info)
 {
@@ -370,12 +413,6 @@ void loadAllImages()
 		img = IMG_Load(it.c_str());
 		if (img)
 		{
-			ImageInfo info;
-			info.filename = it;
-			info.rot90 = false;
-			info.rawwidth = img->w;
-			info.rawheight = img->h;
-			info.boundingoffset = { 0,0 };
 			if (img->format->format != SDL_PIXELFORMAT_ABGR8888)
 			{
 				Img *img2 = SDL_ConvertSurfaceFormat(img, SDL_PIXELFORMAT_ABGR8888, 0);
@@ -385,53 +422,85 @@ void loadAllImages()
 			if (!img)
 			{
 				cout << "failed to load " << it << " as RGBA" << endl;
+				continue;
+			}
+			array<unsigned char, 32> sha;
+			if (options.compact)
+			{
+				using namespace picosha2;
+				hash256((unsigned char *)img->pixels, (unsigned char *)img->pixels + (img->w * img->h * 4), sha);
+				auto it2 = hashedinfomap.find(sha);
+				if (it2 != hashedinfomap.end())
+				{
+					{
+						cout << "Compact file ";
+#ifdef WIN32
+						wstring tmp = UniFromUTF8(it);
+						WriteConsole(GetStdHandle(STD_OUTPUT_HANDLE), tmp.c_str(), tmp.size(), NULL, NULL);
+#else
+						cout << it;
+#endif
+						cout << "(" << infomap[it2->second].bounding.w << "*" << infomap[it2->second].bounding.h << ")" << endl;
+					}
+					infomap[it2->second].filenames.push_back(it);
+					SDL_FreeSurface(img);
+					continue;
+				}
+			}
+			ImageInfo info;
+			info.filenames.push_back(it);
+			info.rot90 = false;
+			info.rawwidth = img->w;
+			info.rawheight = img->h;
+			info.boundingoffset = { 0,0 };
+
+			findBounding(img, info);
+			if (info.bounding.w * info.bounding.h > options.width * options.width)
+			{
+				cout << "Ignore large file ";
+#ifdef WIN32
+				wstring tmp = UniFromUTF8(it);
+				WriteConsole(GetStdHandle(STD_OUTPUT_HANDLE), tmp.c_str(), tmp.size(), NULL, NULL);
+#else
+				cout << it;
+#endif
+				cout << "(" << info.bounding.w << "*" << info.bounding.h << ")" << endl;
+				SDL_FreeSurface(img);
 			}
 			else
 			{
-				findBounding(img, info);
-				if (info.bounding.w * info.bounding.h > options.width * options.width)
+				if (options.rot90 && info.bounding.h > info.bounding.w)
 				{
-					cout << "Ignore large file ";
-				#ifdef WIN32
-					wstring tmp = UniFromUTF8(it);
-					WriteConsole(GetStdHandle(STD_OUTPUT_HANDLE), tmp.c_str(), tmp.size(), NULL, NULL);
-				#else
-					cout << it;
-				#endif
-					cout << "(" << info.bounding.w << "*" << info.bounding.h << ")" << endl;
-					SDL_FreeSurface(img);
-				}
-				else
-				{
-					if (options.rot90 && info.bounding.h > info.bounding.w)
+					info.rot90 = true;
+					//save the rotated img
+					SDL_Surface *src = SDL_CreateRGBSurface(0, info.bounding.h, info.bounding.w, 32, 0xFF, 0xFF00, 0xFF0000, 0xFF000000);
+					//copy rot90
+					for (int x = info.bounding.x; x < info.bounding.x + info.bounding.w; x++)
 					{
-						info.rot90 = true;
-						//save the rotated img
-						SDL_Surface *src = SDL_CreateRGBSurface(0, info.bounding.h, info.bounding.w, 32, 0xFF, 0xFF00, 0xFF0000, 0xFF000000);
-						//copy rot90
-						for (int x = info.bounding.x; x < info.bounding.x + info.bounding.w; x++)
+						//rot 90 counterclockwise
+						int newy = info.bounding.w - 1 - (x - info.bounding.x);
+						for (int y = info.bounding.y; y < info.bounding.y + info.bounding.h; y++)
 						{
-							//rot 90 counterclockwise
-							int newy = info.bounding.w - 1 - (x - info.bounding.x);
-							for (int y = info.bounding.y; y < info.bounding.y + info.bounding.h; y++)
-							{
-								uint32_t *srcdata = (uint32_t*)img->pixels + img->w * y + x;
-								uint32_t *dstdata = (uint32_t*)src->pixels + src->w * newy + y - info.bounding.y;
-								*dstdata = *srcdata;
-							}
+							uint32_t *srcdata = (uint32_t*)img->pixels + img->w * y + x;
+							uint32_t *dstdata = (uint32_t*)src->pixels + src->w * newy + y - info.bounding.y;
+							*dstdata = *srcdata;
 						}
-						SDL_FreeSurface(img);
-						img = src;
-						//info.boundingoffset = { info.bounding.y, info.rawwidth - 1 - info.bounding.x - info.bounding.w };
-						info.boundingoffset = { info.bounding.x, info.bounding.y };	//offset at raw image
-						swap(info.bounding.w, info.bounding.h);
-						info.bounding.x = info.bounding.y = 0;
 					}
-					infomap[img] = info;
-					stat_info.maxWidth = max(stat_info.maxWidth, info.bounding.w);
-					stat_info.maxHeight = max(stat_info.maxHeight, info.bounding.h);
-					stat_info.totalArea += info.bounding.w * info.bounding.h;
+					SDL_FreeSurface(img);
+					img = src;
+					//info.boundingoffset = { info.bounding.y, info.rawwidth - 1 - info.bounding.x - info.bounding.w };
+					info.boundingoffset = { info.bounding.x, info.bounding.y };	//offset at raw image
+					swap(info.bounding.w, info.bounding.h);
+					info.bounding.x = info.bounding.y = 0;
 				}
+				if (options.compact)
+				{
+					hashedinfomap[sha] = img;
+				}
+				infomap[img] = info;
+				stat_info.maxWidth = max(stat_info.maxWidth, info.bounding.w);
+				stat_info.maxHeight = max(stat_info.maxHeight, info.bounding.h);
+				stat_info.totalArea += info.bounding.w * info.bounding.h;
 			}
 		}
 	}
@@ -445,14 +514,17 @@ void printImageBounding()
 #endif
 	for (auto &info : infomap)
 	{
-	#ifdef WIN32
-		wstring tmp = UniFromUTF8(info.second.filename);
-		WriteConsole(h, tmp.c_str(), tmp.size(), NULL, NULL);
-		cout << endl;
-	#else
-		cout << info.second.filename << endl;
-	#endif
-		cout << "\t[" << info.second.bounding.x << "," << info.second.bounding.y << "," << info.second.bounding.w << "," << info.second.bounding.h << "]" << endl;
+		for (auto && filename : info.second.filenames)
+		{
+#ifdef WIN32
+			wstring tmp = UniFromUTF8(filename);
+			WriteConsole(h, tmp.c_str(), tmp.size(), NULL, NULL);
+			cout << endl;
+#else
+			cout << filename << endl;
+#endif
+			cout << "\t[" << info.second.bounding.x << "," << info.second.bounding.y << "," << info.second.bounding.w << "," << info.second.bounding.h << "]" << endl;
+		}
 	}
 }
 
@@ -582,6 +654,8 @@ retry:
 					break;
 				++it2;
 			}
+			if (it2 == LT.end())
+				return false;
 			if (w < (*it)->bounding.w || it2->first + (*it)->bounding.h + 2 > h)
 				return false;
 			linetop = it2->first;
@@ -632,7 +706,10 @@ void saveListFile()
 	set<string> sorted;
 	for (auto &it : infomap)
 	{
-		sorted.insert(it.second.filename.substr(dirlen));
+		for (auto && filename : it.second.filenames)
+		{
+			sorted.insert(filename.substr(dirlen));
+		}
 	}
 	for (auto &it : sorted)
 	{
@@ -650,12 +727,14 @@ void saveToBagelFile()
 	Bagel_StringHolder rects = W("rects");
 	Bagel_StringHolder rectsInBatch = W("rectsInBatch");
 	Bagel_StringHolder rot90 = W("rot90");
+	Bagel_StringHolder link = W("link");
 	int dirlen = options.dir.size();
 	for (auto &it : infomap)
 	{
+		string filename = it.second.filenames[0];
 		auto d = new Bagel_Dic();
 		auto &&info = it.second;
-		d->setMember(name, UTF16FromUTF8(info.filename.substr(dirlen)));
+		d->setMember(name, UTF16FromUTF8(filename.substr(dirlen)));
 		d->setMember(size, { info.rawwidth, info.rawheight });
 		d->setMember(rot90, info.rot90);
 		auto r = new Bagel_Array();
@@ -691,6 +770,15 @@ void saveToBagelFile()
 			rb->pushMember({ it2.x, it2.y, it2.w, it2.h });
 		}
 		d->setMember(rectsInBatch, rb);
+		if (it.second.filenames.size() > 1)
+		{
+			auto dd = new Bagel_Array();
+			for (int i = 1; i < it.second.filenames.size(); i++)
+			{
+				dd->pushMember(UTF16FromUTF8(it.second.filenames[i].substr(dirlen)));
+			}
+			d->setMember(link, dd);
+		}
 		v->pushMember(d);
 	}
 	Bagel_Var res = v;

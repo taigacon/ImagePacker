@@ -24,6 +24,7 @@
 #include <unordered_set>
 #include <algorithm>
 #include <functional>
+#include <array>
 
 using namespace std;
 
