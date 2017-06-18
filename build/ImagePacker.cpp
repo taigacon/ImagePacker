@@ -35,7 +35,6 @@ struct
 	int width;
 	bool rot90;
 	bool bound;
-	bool split;
 	enum
 	{
 		FMT_BKE,
@@ -52,7 +51,6 @@ void initOption()
 	options.subdir = false;
 	options.rot90 = true;
 	options.bound = true;
-	options.split = false;
 	options.format = options.FMT_BKE;
 	options.compact = false;
 }
@@ -118,10 +116,6 @@ void readOption(int argc, wchar_t ** argv)
 		else if (!wcscmp(L"--disablebound", *argv))
 		{
 			options.bound = false;
-		}
-		else if (!wcscmp(L"--enablesplit", *argv))
-		{
-			options.split = true;
 		}
 		else if (!wcscmp(L"-format", *argv))
 		{
@@ -529,19 +523,11 @@ int nextPOT(double x)
 void calcCanvasSize(int &w, int &h)
 {
 	int len = nextPOT(1.1 * sqrt(stat_info.totalArea));
-	if (!options.split)
-	{
-		w = max(len, stat_info.maxWidth);
-		w = nextPOT(w);
-		h = nextPOT(1.2 * stat_info.totalArea / w);
-		h = max(h, stat_info.maxHeight);
-		h = nextPOT(h);
-	}
-	else
-	{
-		w = len;
-		h = nextPOT(1.2 * stat_info.totalArea / w);
-	}
+	w = max(len, stat_info.maxWidth);
+	w = nextPOT(w);
+	h = nextPOT(1.2 * stat_info.totalArea / w);
+	h = max(h, stat_info.maxHeight);
+	h = nextPOT(h);
 	w = max(w, 32);
 	h = max(h, 32);
 }
@@ -776,9 +762,15 @@ void saveListFile()
 	_globalStructures.writeFunc(res, UniToUTF16(options.outlistfile), 0);
 }
 
-void saveToBagelFile()
+void saveToBagelFile(int w, int h)
 {
+	auto root = new Bagel_Dic();
 	auto v = new Bagel_Array();
+	root->setMember(W("contents"), v);
+	root->setMember(W("width"), w);
+	root->setMember(W("height"), h);
+	root->setMember(W("version"), 1);
+
 	Bagel_StringHolder name = W("name");
 	Bagel_StringHolder size = W("size");
 	Bagel_StringHolder rects = W("rects");
@@ -838,7 +830,7 @@ void saveToBagelFile()
 		}
 		v->pushMember(d);
 	}
-	Bagel_Var res = v;
+	Bagel_Var res = root;
 	res.saveToFile(UniToUTF16(options.output + L".bkpsr"), true);
 }
 
@@ -849,7 +841,7 @@ void saveToFile(Img *img)
 	switch (options.format)
 	{
 	case options.FMT_BKE:
-		saveToBagelFile();
+		saveToBagelFile(img->w, img->h);
 		break;
 
 	}
@@ -892,35 +884,32 @@ int wmain(int argc, wchar_t ** argv)
 	int w, h;
 	calcCanvasSize(w, h);
 
-	if (!options.split)
+	bool res = doWithoutSplit(w, h);
+	while (!res && (w < 2048 || h < 2048))
 	{
-		bool res = doWithoutSplit(w, h);
-		while (!res && (w < 2048 || h < 2048))
+		if (w != h)
 		{
-			if (w != h)
-			{
-				w = max(w, h);
-				h = max(w, h);
-			}
-			else
-			{
-				w *= 2;
-			}
-			clearRectsInfo();
-			res = doWithoutSplit(w, h);
+			w = max(w, h);
+			h = max(w, h);
 		}
-		if (!res)
+		else
 		{
-			goto fail;
+			w *= 2;
 		}
-		Img *batch = blitImages(w, h);
-		if (!batch)
-			goto fail;
-		saveToFile(batch);
-		wcout << "pack success!" << endl;
-		wcout << "Pack image size " << w << " * " << h << endl;
-		goto end;
+		clearRectsInfo();
+		res = doWithoutSplit(w, h);
 	}
+	if (!res)
+	{
+		goto fail;
+	}
+	Img *batch = blitImages(w, h);
+	if (!batch)
+		goto fail;
+	saveToFile(batch);
+	wcout << "pack success!" << endl;
+	wcout << "Pack image size " << w << " * " << h << endl;
+	goto end;
 
 
 fail:
