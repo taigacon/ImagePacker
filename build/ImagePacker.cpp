@@ -10,9 +10,12 @@
 #include <io.h>
 #endif
 
+#undef min
+#undef max
+
 void print_usage(const wchar_t *exe)
 {
-	wcout << exe << " -o filename [-d Directory=./] [-sz width=256] [--includesubdir] [--disablerot] [--disablebound] [--enablesplit] [-format format=bagel] [-ol listfilename]" << endl
+	wcout << exe << " -o filename [-d Directory=./] [-sz width=256] [--includesubdir] [--disablerot] [--disablebound] [-compact] [-format format=bagel] [-ol listfilename]" << endl
 		<< "For example:" << endl
 		<< exe << "-o output -sz 512 --enablesplit -format bagel" << endl << endl
 		<< "\t-o means output file (image file and data file), without extension" << endl
@@ -20,7 +23,7 @@ void print_usage(const wchar_t *exe)
 		<< "\t-sz means only handle picture with area (after bounding) smaller or euqal to this value's square" << endl
 		<< "\t--disablerot means don't rotate picture 90 degree when generate packer image" << endl
 		<< "\t--disablebound means don't scissor alpha area when packing images" << endl
-		<< "\t--enablesplit means we may split the picture into small parts during packing, usually used in long slice image" << endl
+		<< "\t-compact means compact same images when necessary" << endl
 		<< "\t-format means the format of output data, now only can be bke" << endl
 		<< "\t-ol means the filename of the output list file, tell you which files are packed" << endl;
 }
@@ -42,6 +45,7 @@ struct
 		FMT_PLIST
 	}format;
 	bool compact;
+	bool npot;
 }options;
 
 void initOption()
@@ -53,6 +57,7 @@ void initOption()
 	options.bound = true;
 	options.format = options.FMT_BKE;
 	options.compact = false;
+	options.npot = false;
 }
 
 //if file is a relative path, set it to be full path by see it as a file under dir
@@ -143,6 +148,10 @@ void readOption(int argc, wchar_t ** argv)
 		else if (!wcscmp(L"-compact", *argv))
 		{
 			options.compact = true;
+		}
+		else if (!wcscmp(L"-npot", *argv))
+		{
+			options.npot = true;
 		}
 		else
 		{
@@ -246,17 +255,25 @@ typedef struct
 	int w, h;
 } Rect;
 
+Rect intersectRect(const Rect &dst, const Rect &src)
+{
+	auto minx = std::min(dst.x, src.x);
+	auto miny = std::min(dst.y, src.y);
+	auto maxx = std::max(dst.x + dst.w, src.x + src.w);
+	auto maxy = std::max(dst.y + dst.h, src.y + src.h);
+	return{ minx, miny, maxx - minx, maxy - miny };
+}
+
 struct ImageInfo
 {
 	vector<wstring> filenames;
 	int rawwidth;
 	int rawheight;
 	Rect bounding;
-	vector<Rect> split;
 	Point boundingoffset;
 
 	bool rot90;
-	vector<Rect> dstRect;
+	Rect dstRect;
 };
 
 struct
@@ -406,7 +423,6 @@ void loadAllImages()
 	for (auto it : input_files)
 	{
 		tp.enqueue([&, it]() {
-			size--;
 			Img *img = new Img();
 			if (img->initWithFile(it))
 			{
@@ -425,6 +441,7 @@ void loadAllImages()
 						wcout << "(" << infomap[it2->second].bounding.w << "*" << infomap[it2->second].bounding.h << ")" << endl;
 						infomapmutex.unlock();
 						delete img;
+						size--;
 						return;
 					}
 					infomapmutex.unlock();
@@ -494,11 +511,12 @@ void loadAllImages()
 			{
 				delete img;
 			}
+			size--;
 		});
 	}
 	while (size != 0)
 	{
-		std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+		std::this_thread::sleep_for(std::chrono::milliseconds(300));
 	}
 }
 
@@ -534,10 +552,7 @@ void calcCanvasSize(int &w, int &h)
 
 void clearRectsInfo()
 {
-	for (auto &it : infomap)
-	{
-		it.second.dstRect.clear();
-	}
+	
 }
 
 int findLeft(map<int, int>& LT, int t)
@@ -580,7 +595,7 @@ retry:
 	int left = 0;
 	for (auto it = LHimgs.rbegin(); it != LHimgs.rend(); ++it)
 	{
-		(*it)->dstRect.push_back({ left, 0, (*it)->bounding.w,(*it)->bounding.h });
+		(*it)->dstRect = { left, 0, (*it)->bounding.w,(*it)->bounding.h };
 		LT[(*it)->bounding.h] = left + (*it)->bounding.w;
 		left += (*it)->bounding.w;
 		//¼ä¸ô
@@ -607,7 +622,7 @@ retry:
 				clearRectsInfo();
 				goto retry;
 			}
-			(*it)->dstRect.push_back({ left, linetop, (*it)->bounding.w,(*it)->bounding.h });
+			(*it)->dstRect = { left, linetop, (*it)->bounding.w,(*it)->bounding.h };
 			lineheight = max(lineheight, (*it)->bounding.h);
 			left += (*it)->bounding.w;
 			//¼ä¸ô
@@ -646,9 +661,6 @@ retry:
 	}
 	return true;
 }
-
-#undef min
-#undef max
 void drawRectAt(unsigned char *dst, uint32_t dstWidth, uint32_t dstHeight, const unsigned char *src, uint32_t srcWidth, uint32_t srcHeight, uint32_t srcRectX, uint32_t srcRectY, uint32_t srcRectWidth, uint32_t srcRectHeight, int32_t x, int32_t y)
 {
 	if ((int32_t)dstWidth < x || (int32_t)dstHeight < y)
@@ -716,17 +728,7 @@ Img *blitImages(int w, int h)
 		tp.enqueue([&, it]() {
 			size--;
 			Img *src = it.first;
-			if (it.second.split.empty())
-			{
-				drawRectAt(batch->pixels, batch->w, batch->h, src->pixels, src->w, src->h, it.second.bounding.x, it.second.bounding.y, it.second.bounding.w, it.second.bounding.h, it.second.dstRect.back().x, it.second.dstRect.back().y);
-			}
-			else
-			{
-				for (int i = 0; i < it.second.split.size(); i++)
-				{
-					drawRectAt(batch->pixels, batch->w, batch->h, src->pixels, src->w, src->h, it.second.split[i].x, it.second.split[i].y, it.second.split[i].w, it.second.split[i].h, it.second.dstRect[i].x, it.second.dstRect[i].y);
-				}
-			}
+			drawRectAt(batch->pixels, batch->w, batch->h, src->pixels, src->w, src->h, it.second.bounding.x, it.second.bounding.y, it.second.bounding.w, it.second.bounding.h, it.second.dstRect.x, it.second.dstRect.y);
 		});
 	}
 	while (size != 0)
@@ -739,7 +741,6 @@ Img *blitImages(int w, int h)
 void saveImageFile(Img *img)
 {
 	img->saveImageToPNG(options.output + L".png", false);
-	delete img;
 }
 
 void saveListFile()
@@ -773,8 +774,8 @@ void saveToBagelFile(int w, int h)
 
 	Bagel_StringHolder name = W("name");
 	Bagel_StringHolder size = W("size");
-	Bagel_StringHolder rects = W("rects");
-	Bagel_StringHolder rectsInBatch = W("rectsInBatch");
+	Bagel_StringHolder rect = W("rect");
+	Bagel_StringHolder rectInBatch = W("rectInBatch");
 	Bagel_StringHolder rot90 = W("rot90");
 	Bagel_StringHolder link = W("link");
 	int dirlen = options.dir.size();
@@ -786,39 +787,8 @@ void saveToBagelFile(int w, int h)
 		d->setMember(name, UniToUTF16(filename.substr(dirlen)));
 		d->setMember(size, { info.rawwidth, info.rawheight });
 		d->setMember(rot90, info.rot90);
-		auto r = new Bagel_Array();
-		if (info.split.empty())
-		{
-			if (info.rot90)
-			{
-				r->pushMember({ info.boundingoffset.x, info.boundingoffset.y, info.bounding.h, info.bounding.w });
-			}
-			else
-			{
-				r->pushMember({ info.bounding.x, info.bounding.y, info.bounding.w, info.bounding.h });
-			}
-		}
-		else
-		{
-			for (auto &it2 : info.split)
-			{
-				if (info.rot90)
-				{
-					r->pushMember({ info.bounding.h - it2.y - it2.h + info.boundingoffset.x, it2.x + info.boundingoffset.y, it2.h, it2.w });
-				}
-				else
-				{
-					r->pushMember({ it2.x, it2.y, it2.w, it2.h });
-				}
-			}
-		}
-		d->setMember(rects, r);
-		auto rb = new Bagel_Array();
-		for (auto &it2 : info.dstRect)
-		{
-			rb->pushMember({ it2.x, it2.y, it2.w, it2.h });
-		}
-		d->setMember(rectsInBatch, rb);
+		d->setMember(rect, { info.boundingoffset.x, info.boundingoffset.y, info.bounding.h, info.bounding.w });
+		d->setMember(rectInBatch, { info.dstRect.x, info.dstRect.y, info.dstRect.w, info.dstRect.h });
 		if (it.second.filenames.size() > 1)
 		{
 			auto dd = new Bagel_Array();
@@ -847,6 +817,21 @@ void saveToFile(Img *img)
 	}
 }
 
+void trim(int &w, int &h)
+{
+	Rect rect = { 0,0,0,0 };
+	for (auto &it : infomap)
+	{
+		rect = intersectRect(rect, it.second.dstRect);
+	}
+	if (rect.w % 2 == 1)
+		rect.w += 1;
+	if (rect.h % 2 == 1)
+		rect.h += 1;
+	w = rect.w;
+	h = rect.h;
+}
+
 void releaseImgs()
 {
 	for (auto &it : infomap)
@@ -854,6 +839,7 @@ void releaseImgs()
 		delete it.first;
 	}
 }
+
 
 int wmain(int argc, wchar_t ** argv)
 {
@@ -903,10 +889,15 @@ int wmain(int argc, wchar_t ** argv)
 	{
 		goto fail;
 	}
+	if (options.npot)
+	{
+		trim(w, h);
+	}
 	Img *batch = blitImages(w, h);
 	if (!batch)
 		goto fail;
 	saveToFile(batch);
+	delete batch;
 	wcout << "pack success!" << endl;
 	wcout << "Pack image size " << w << " * " << h << endl;
 	goto end;
