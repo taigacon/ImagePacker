@@ -787,7 +787,14 @@ void saveToBagelFile(int w, int h)
 		d->setMember(name, UniToUTF16(filename.substr(dirlen)));
 		d->setMember(size, { info.rawwidth, info.rawheight });
 		d->setMember(rot90, info.rot90);
-		d->setMember(rect, { info.boundingoffset.x, info.boundingoffset.y, info.bounding.h, info.bounding.w });
+		if (info.rot90)
+		{
+			d->setMember(rect, { info.boundingoffset.x, info.boundingoffset.y, info.bounding.h, info.bounding.w });
+		}
+		else
+		{
+			d->setMember(rect, { info.bounding.x, info.bounding.y, info.bounding.w, info.bounding.h });
+		}
 		d->setMember(rectInBatch, { info.dstRect.x, info.dstRect.y, info.dstRect.w, info.dstRect.h });
 		if (it.second.filenames.size() > 1)
 		{
