@@ -211,8 +211,8 @@ struct jpeg_marker_struct {
 
 /* Known color spaces. */
 
-#define JCS_EXTENSIONS
-#define JCS_ALPHA_EXTENSIONS
+#undef JCS_EXTENSIONS
+#undef JCS_ALPHA_EXTENSIONS
 
 typedef enum {
   JCS_UNKNOWN,            /* error/unspecified */

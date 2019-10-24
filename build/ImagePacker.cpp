@@ -5,6 +5,7 @@
 #include "picosha2.h"
 #include "ThreadPool.h"
 #include <atomic>
+#include "Path.h"
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -15,17 +16,17 @@
 
 void print_usage(const wchar_t *exe)
 {
-	wcout << exe << " -o filename [-d Directory=./] [-sz width=256] [--includesubdir] [--disablerot] [--disablebound] [-compact] [-format format=bagel] [-ol listfilename]" << endl
+	wcout << exe << " -o filename [-d Directory=./] [options]" << endl
 		<< "For example:" << endl
-		<< exe << "-o output -sz 512 --enablesplit -format bagel" << endl << endl
+		<< exe << "-o output --size 512 --format bagel" << endl << endl
 		<< "\t-o means output file (image file and data file), without extension" << endl
 		<< "\t-d means input directory" << endl
-		<< "\t-sz means only handle picture with area (after bounding) smaller or euqal to this value's square" << endl
-		<< "\t--disablerot means don't rotate picture 90 degree when generate packer image" << endl
-		<< "\t--disablebound means don't scissor alpha area when packing images" << endl
-		<< "\t-compact means compact same images when necessary" << endl
-		<< "\t-format means the format of output data, now only can be bke" << endl
-		<< "\t-ol means the filename of the output list file, tell you which files are packed" << endl;
+		<< "\t--size means only handle picture with area (after bounding) smaller or equals to this value's square" << endl
+		<< "\t--disable-rotate means don't rotate picture 90 degree when generate packer image" << endl
+		<< "\t--disable-bounds means don't scissor alpha area when packing images" << endl
+		<< "\t--compact means compact same images when necessary" << endl
+		<< "\t--format means the format of output data, now only can be bke" << endl
+		<< "\t--output-list means the filename of the output list file, tell you which files are packed" << endl;
 }
 
 struct
@@ -46,7 +47,12 @@ struct
 	}format;
 	bool compact;
 	bool npot;
+	bool dryrun;
+	vector<wstring> whiteList;
+	vector<wstring> blackList;
 }options;
+
+vector<wstring> input_files;
 
 void initOption()
 {
@@ -58,20 +64,45 @@ void initOption()
 	options.format = options.FMT_BKE;
 	options.compact = false;
 	options.npot = false;
+	options.dryrun = false;
 }
 
 //if file is a relative path, set it to be full path by see it as a file under dir
-void mergePath(const wstring &dir, wstring &file)
+wstring mergePath(const wstring &dir, const wstring &file)
 {
 	if (file.empty())
-		return;
+		return file;
 	//absolute path on windows
 	if (file.size() > 2 && file[1] == ':')
-		return;
+		return file;
 	//linux
 	if (file[0] == '/' || file.substr(0,2) == L"~/")
-		return;
-	file = dir + file;
+		return file;
+	return dir + file;
+}
+
+void normalizePath(wstring &path)
+{
+	for(auto &&ch : path)
+	{
+		if (ch == L'\\')
+			ch = '/';
+	}
+}
+
+vector<wstring> split(const wstring& str, const wstring& delim)
+{
+	vector<wstring> tokens;
+	size_t prev = 0, pos = 0;
+	do
+	{
+		pos = str.find(delim, prev);
+		if (pos == wstring::npos) pos = str.length();
+		wstring token = str.substr(prev, pos - prev);
+		if (!token.empty()) tokens.push_back(token);
+		prev = pos + delim.length();
+	} while (pos < str.length() && prev < str.length());
+	return tokens;
 }
 
 void readOption(int argc, wchar_t ** argv)
@@ -86,43 +117,74 @@ void readOption(int argc, wchar_t ** argv)
 			if (argv)
 			{
 				options.dir = *argv;
+				normalizePath(options.dir);
 				if (options.dir.empty())
 					options.dir = L"./";
-				if (options.dir.back() != '/' && options.dir.back() != '\\')
+				if (options.dir.back() != '/')
 					options.dir.push_back('/');
+			}
+		}
+		else if(!wcscmp(L"-i", *argv))
+		{
+			++argv;
+			if(argv)
+			{
+				options.whiteList = split(*argv, L";");
+				for(auto &&s : options.whiteList)
+				{
+					normalizePath(s);
+				}
+			}
+		}
+		else if (!wcscmp(L"-b", *argv))
+		{
+			++argv;
+			if (argv)
+			{
+				options.blackList = split(*argv, L";");
+				for (auto &&s : options.blackList)
+				{
+					normalizePath(s);
+				}
 			}
 		}
 		else if (!wcscmp(L"-o", *argv))
 		{
 			++argv;
 			if (argv)
+			{
 				options.output = *argv;
+				normalizePath(options.output);
+			}
 		}
-		else if (!wcscmp(L"-ol", *argv))
+		else if (!wcscmp(L"--output-list", *argv))
 		{
 			++argv;
 			if (argv)
+			{
 				options.outlistfile = *argv;
+				normalizePath(options.outlistfile);
+			}
 		}
-		else if (!wcscmp(L"-sz", *argv))
+		else if (!wcscmp(L"--size", *argv))
 		{
 			++argv;
 			if (argv)
 				options.width = wcstol(*argv, nullptr, 10);
 		}
-		else if (!wcscmp(L"--includesubdir", *argv))
+		else if (!wcscmp(L"--include-subdir", *argv))
 		{
 			options.subdir = true;
 		}
-		else if (!wcscmp(L"--disablerot", *argv))
+		else if (!wcscmp(L"--disable-rotate", *argv))
 		{
 			options.rot90 = false;
 		}
-		else if (!wcscmp(L"--disablebound", *argv))
+		else if (!wcscmp(L"--disable-bounds", *argv))
 		{
 			options.bound = false;
 		}
-		else if (!wcscmp(L"-format", *argv))
+		else if (!wcscmp(L"--format", *argv))
 		{
 			++argv;
 			if (argv)
@@ -145,13 +207,17 @@ void readOption(int argc, wchar_t ** argv)
 				}
 			}
 		}
-		else if (!wcscmp(L"-compact", *argv))
+		else if (!wcscmp(L"--compact", *argv))
 		{
 			options.compact = true;
 		}
-		else if (!wcscmp(L"-npot", *argv))
+		else if (!wcscmp(L"--npot", *argv))
 		{
 			options.npot = true;
+		}
+		else if (!wcscmp(L"--dry-run", *argv))
+		{
+			options.dryrun = true;
 		}
 		else
 		{
@@ -160,8 +226,8 @@ void readOption(int argc, wchar_t ** argv)
 		if(argv)
 			++argv;
 	}
-	mergePath(options.dir, options.output);
-	mergePath(options.dir, options.outlistfile);
+	options.output = mergePath(options.dir, options.output);
+	options.outlistfile = mergePath(options.dir, options.outlistfile);
 }
 
 unordered_set<wstring> exts = {
@@ -170,27 +236,32 @@ unordered_set<wstring> exts = {
 	L"png",
 };
 
-list<wstring> input_files;
-
 #ifdef WIN32
 #define _WINSOCKAPI_
 #include <Windows.h>
 
-auto v = GetVersion();
-bool nt = ((v & 0xFF) >= 6) && ((v & 0xFF00) >= 100);
+wstring fixFile(const wstring &file)
+{
+	WIN32_FIND_DATAW data;
+	wstring fmt = file + L".*";
+	HANDLE h = FindFirstFileEx(fmt.c_str(), FindExInfoBasic, &data, FindExSearchNameMatch, NULL, FIND_FIRST_EX_LARGE_FETCH);
+	if (h == INVALID_HANDLE_VALUE)
+		return wstring();
+	int offset = file.find_last_of(L"/\\");
+	if (offset == -1)
+		return data.cFileName;
+	else
+		return file.substr(0, offset + 1) + data.cFileName;
+}
 
 void getFiles(const wstring &parentDir)
 {
 	WIN32_FIND_DATAW data;
-	HANDLE h;
 	wstring fmt = parentDir.empty() ? L"*" : (parentDir + L"*");
-	if (nt)
-		h = FindFirstFileEx(fmt.c_str(), FindExInfoBasic, &data, FindExSearchNameMatch, NULL, FIND_FIRST_EX_LARGE_FETCH);
-	else
-		h = FindFirstFile(fmt.c_str(), &data);
+	HANDLE h =  FindFirstFileEx(fmt.c_str(), FindExInfoBasic, &data, FindExSearchNameMatch, NULL, FIND_FIRST_EX_LARGE_FETCH);
 	if (h == INVALID_HANDLE_VALUE)
 		return;
-	while (FindNextFile(h, &data))
+	do
 	{
 		wstring fname = data.cFileName;
 		if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
@@ -206,8 +277,18 @@ void getFiles(const wstring &parentDir)
 			wstring p = parentDir + fname + L'/';
 			getFiles(p);
 		}
-	}
+	} while (FindNextFile(h, &data));
 	FindClose(h);
+}
+
+#ifndef S_ISDIR
+#define S_ISDIR(mode)  (((mode) & S_IFMT) == S_IFDIR)
+#endif
+
+bool is_dir(const wchar_t* path) {
+	struct _stat64i32 buf;
+	_wstat(path, &buf);
+	return S_ISDIR(buf.st_mode);
 }
 
 #else
@@ -240,6 +321,12 @@ void getFiles(const wstring &parentDir)
 			}
 		}
 	}
+}
+
+bool is_dir(const wchar_t* path) {
+	struct stat buf;
+	stat(UniToUTF8(path).c_str(), &buf);
+	return S_ISDIR(buf.st_mode);
 }
 
 #endif
@@ -419,7 +506,7 @@ void loadAllImages()
 	stat_info.maxHeight = 0;
 	stat_info.maxWidth = 0;
 	stat_info.totalArea = 0;
-	atomic<int> size = input_files.size();
+	volatile atomic<int> size = input_files.size();
 	for (auto it : input_files)
 	{
 		tp.enqueue([&, it]() {
@@ -430,18 +517,18 @@ void loadAllImages()
 				if (options.compact)
 				{
 					using namespace picosha2;
-					hash256((unsigned char *)img->pixels, (unsigned char *)img->pixels + (img->w * img->h * 4), sha);
+					hash256((unsigned char *)img->pixels, (unsigned char *)img->pixels + img->pitch * img->h, sha);
 					infomapmutex.lock();
 					auto it2 = hashedinfomap.find(sha);
 					if (it2 != hashedinfomap.end())
 					{
 						infomap[it2->second].filenames.push_back(it);
-						wcout << "Compact file ";
+						wcout << L"Compact file ";
 						wcout << it;
-						wcout << "(" << infomap[it2->second].bounding.w << "*" << infomap[it2->second].bounding.h << ")" << endl;
+						wcout << L"(" << infomap[it2->second].bounding.w << L"*" << infomap[it2->second].bounding.h << L")" << endl;
 						infomapmutex.unlock();
 						delete img;
-						size--;
+						--size;
 						return;
 					}
 					infomapmutex.unlock();
@@ -458,9 +545,9 @@ void loadAllImages()
 				{
 					//sync wcout
 					infomapmutex.lock();
-					wcout << "Ignore large file ";
+					wcout << L"Ignore large file ";
 					wcout << it;
-					wcout << "(" << info.bounding.w << "*" << info.bounding.h << ")" << endl;
+					wcout << L"(" << info.bounding.w << L"*" << info.bounding.h << L")" << endl;
 					infomapmutex.unlock();
 					delete img;
 				}
@@ -501,9 +588,9 @@ void loadAllImages()
 					stat_info.maxHeight = max(stat_info.maxHeight, info.bounding.h);
 					stat_info.totalArea += info.bounding.w * info.bounding.h;
 
-					wcout << "Packed: ";
+					wcout << L"Packed: ";
 					wcout << it;
-					wcout << "(" << info.bounding.w << "*" << info.bounding.h << ")" << endl;
+					wcout << L"(" << info.bounding.w << L"*" << info.bounding.h << L")" << endl;
 					infomapmutex.unlock();
 				}
 			}
@@ -511,7 +598,7 @@ void loadAllImages()
 			{
 				delete img;
 			}
-			size--;
+			--size;
 		});
 	}
 	while (size != 0)
@@ -528,7 +615,7 @@ void printImageBounding()
 		for (auto && filename : info.second.filenames)
 		{
 			wcout << filename << endl;
-			wcout << "\t[" << info.second.bounding.x << "," << info.second.bounding.y << "," << info.second.bounding.w << "," << info.second.bounding.h << "]" << endl;
+			wcout << L"\t[" << info.second.bounding.x << L"," << info.second.bounding.y << L"," << info.second.bounding.w << L"," << info.second.bounding.h << L"]" << endl;
 		}
 	}
 }
@@ -717,18 +804,18 @@ void drawRectAt(unsigned char *dst, uint32_t dstWidth, uint32_t dstHeight, const
 
 Img *blitImages(int w, int h)
 {
-	wcout << "Generating batch image..." << endl;
+	wcout << L"Generating batch image..." << endl;
 	Img *batch = new Img();
 	batch->init(w, h);
 	batch->clear();
 	ThreadPool &tp = ThreadPool::getInstance();
-	atomic<int> size = infomap.size();
+	volatile atomic<int> size = infomap.size();
 	for (auto it : infomap)
 	{
 		tp.enqueue([&, it]() {
-			size--;
 			Img *src = it.first;
 			drawRectAt(batch->pixels, batch->w, batch->h, src->pixels, src->w, src->h, it.second.bounding.x, it.second.bounding.y, it.second.bounding.w, it.second.bounding.h, it.second.dstRect.x, it.second.dstRect.y);
+			--size; 
 		});
 	}
 	while (size != 0)
@@ -814,7 +901,6 @@ void saveToBagelFile(int w, int h)
 void saveToFile(Img *img)
 {
 	saveImageFile(img);
-	saveListFile();
 	switch (options.format)
 	{
 	case options.FMT_BKE:
@@ -852,7 +938,9 @@ int wmain(int argc, wchar_t ** argv)
 {
 #ifdef WIN32
 #ifdef _MSC_VER
-	_setmode(_fileno(stdout), _O_U16TEXT);
+	setlocale(LC_CTYPE, "");
+	locale::global(locale(""));
+	wcout.imbue(locale(""));
 #endif
 #elif defined(LINUX)
 	setlocale(LC_CTYPE, "");
@@ -870,7 +958,77 @@ int wmain(int argc, wchar_t ** argv)
 	}
 	initOption();
 	readOption(argc, argv);
-	getFiles(options.dir);
+	if(options.whiteList.empty())
+		getFiles(options.dir);
+	else
+	{
+		for(auto &&s : options.whiteList)
+		{
+			wstring path = mergePath(options.dir, s);
+			if(is_dir(path.c_str()))
+			{
+				if (path.back() != '/')
+					path.push_back('/');
+				getFiles(path);
+			}
+			else
+			{
+				path = fixFile(path);
+				if(!path.empty())
+					input_files.push_back(path);
+			}
+		}
+	}
+	if(!options.blackList.empty())
+	{
+		for (auto &&s : options.blackList)
+		{
+			wstring path = mergePath(options.dir, s);
+			if (is_dir(path.c_str()))
+			{
+				path.push_back(L'/');
+				for(auto i = input_files.begin(); i != input_files.end();)
+				{
+					//begin_with
+					if(wcsncmp((*i).c_str(), path.c_str(), path.size()) == 0)
+					{
+						i = input_files.erase(i);
+					}
+					else
+					{
+						++i;
+					}
+				}
+			}
+			else
+			{
+				for (auto i = input_files.begin(); i != input_files.end();)
+				{
+					if(path.back() == '*')
+					{
+						//begin_with
+						if (wcsncmp((*i).c_str(), path.c_str(), path.size()) == 0)
+						{
+							i = input_files.erase(i);
+						}
+						else
+						{
+							++i;
+						}
+					}
+					if(Path::getPathWithoutExtension(*i) == path || *i == path)
+					{
+						i = input_files.erase(i);
+					}
+					else
+					{
+						++i;
+					}
+				}
+			}
+		}
+
+	}
 	loadAllImages();
 
 	//printImageBounding();
@@ -900,19 +1058,30 @@ int wmain(int argc, wchar_t ** argv)
 	{
 		trim(w, h);
 	}
-	Img *batch = blitImages(w, h);
-	if (!batch)
-		goto fail;
-	saveToFile(batch);
-	delete batch;
-	wcout << "pack success!" << endl;
-	wcout << "Pack image size " << w << " * " << h << endl;
+	if(!options.dryrun)
+	{
+		Img *batch = blitImages(w, h);
+		if (!batch)
+			goto fail;
+		saveToFile(batch);
+		delete batch;
+	}
+	saveListFile();
+	if(options.dryrun)
+	{
+		wcout << L"Pack success (--dry-run)!" << endl;
+	}
+	else
+	{
+		wcout << L"Pack success!" << endl;
+	}
+	wcout << L"Pack image size " << w << L" * " << h << endl;
 	goto end;
 
 
 fail:
-	wcout << "fail to pack iamges, maybe too many images to pack" << endl;
-
+	wcout << L"Fail to pack images, maybe too many images to pack" << endl;
+	return 1;
 
 end:
 	releaseImgs();

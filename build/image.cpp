@@ -222,11 +222,11 @@ bool Image::_initWithJpgData(void * data, int nSize)
 #endif
 
         // we only support RGB or grayscale
-        if (cinfo.jpeg_color_space != JCS_EXT_RGBA)
+        if (cinfo.jpeg_color_space != JCS_RGB)
         {
             if (cinfo.jpeg_color_space == JCS_GRAYSCALE || cinfo.jpeg_color_space == JCS_YCbCr)
             {
-                cinfo.out_color_space = JCS_EXT_RGBA;
+                cinfo.out_color_space = JCS_RGB;
             }
         }
         else
@@ -306,9 +306,8 @@ bool Image::_initWithPngData(void * pData, int nDatalen)
 		if (!info_ptr)
 			break;
 
-#if (CC_TARGET_PLATFORM != CC_PLATFORM_BADA && CC_TARGET_PLATFORM != CC_PLATFORM_NACL)
-        CC_BREAK_IF(setjmp(png_jmpbuf(png_ptr)));
-#endif
+        if(setjmp(png_jmpbuf(png_ptr)))
+			break;
 
         // set the read call back function
         tImageSource imageSource;
@@ -324,7 +323,6 @@ bool Image::_initWithPngData(void * pData, int nDatalen)
         
         w = png_get_image_width(png_ptr, info_ptr);
 		h = png_get_image_height(png_ptr, info_ptr);
-		pitch = w * 4;
 		int m_nBitsPerComponent = png_get_bit_depth(png_ptr, info_ptr);
         png_uint_32 color_type = png_get_color_type(png_ptr, info_ptr);
 
@@ -357,6 +355,15 @@ bool Image::_initWithPngData(void * pData, int nDatalen)
             png_set_gray_to_rgb(png_ptr);
         }
 
+		/* Turn off CRC checking while reading */
+		png_set_crc_action(png_ptr, PNG_CRC_QUIET_USE, PNG_CRC_QUIET_USE);
+
+#ifdef PNG_IGNORE_ADLER32
+		/* Turn off ADLER32 checking while reading */
+		png_set_option(png_ptr, PNG_IGNORE_ADLER32, PNG_OPTION_ON);
+#endif
+
+
         // read png data
         // m_nBitsPerComponent will always be 8
         m_nBitsPerComponent = 8;
@@ -366,6 +373,7 @@ bool Image::_initWithPngData(void * pData, int nDatalen)
         png_read_update_info(png_ptr, info_ptr);
         
         rowbytes = png_get_rowbytes(png_ptr, info_ptr);
+		pitch = rowbytes;
         
         pixels = new unsigned char[rowbytes * h];
 		if (!pixels)
