@@ -1016,7 +1016,7 @@ int wmain(int argc, wchar_t ** argv)
 							++i;
 						}
 					}
-					if(Path::getPathWithoutExtension(*i) == path || *i == path)
+					else if(Path::getPathWithoutExtension(*i) == path || *i == path)
 					{
 						i = input_files.erase(i);
 					}
